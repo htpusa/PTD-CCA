@@ -9,7 +9,7 @@ function [W r V c] = PTDCCApath(X,varargin)
 %   INPUTS:
 %   X           -   Mx1 cell where M is the number of views and X{M} is a
 %                       NxPm matrix with N rows corresponding to samples and
-%                       Pm columnds to variables
+%                       Pm columns to variables
 %   OPTIONAL INPUTS:
 %   'D'         -   double, the number of canonical variable tuples
 %                       (default: 1)
@@ -18,19 +18,19 @@ function [W r V c] = PTDCCApath(X,varargin)
 %   'c'         -   vector, the sequence of c values to use
 %                       should be in ascending order
 %                       (default: linspace(0,1,L))
-%   'initType'  -   "tensor" or "matrix, how to initialise the algorithm
+%   'initType'  -  "tensor" or "random", how to initialise the algorithm
 %                       (default: "tensor")
 %                       "tensor" uses the singular vectors of the
 %                       cross-covariance tensor. Probably the best option but
 %                       costly for larger data
-%                       "matrix" uses the singular vectors of the pairwise
-%                       cross-covariance matrices
+%                       "random" tries several random starts
 %   'CCten'     -   P1xP2x...xPm tensor, the cross-variance tensor of the data
 %                       in X
 %                       If the algorithm is run multiple times, time can be
 %                       saved by calculating the tensor offline
 %   'maxIter'   -   maximum number of iterations (default: 1000)
 %   'eps'       -   stopping criterion threshold (default: 1e-10)
+%   'rStarts'   -   how many random starts are tried (default: 5)
 %
 %   OUTPUTS:
 %   'W'         -   Mx1 cell where W{m} is an Pmx100xD matrix
@@ -59,6 +59,7 @@ param.maxIter = 1000;
 param.eps = 1e-10;
 CCten = [];
 init = "tensor";
+rInits = 5;
 
 if ~isempty(varargin)
     if rem(size(varargin, 2), 2) ~= 0
@@ -76,6 +77,8 @@ if ~isempty(varargin)
 					param.maxIter = varargin{1, i+1};
                 case 'eps'
 					param.eps = varargin{1, i+1};
+                case 'rStarts'
+					rInits = varargin{1, i+1};
                 case 'CCten'
 					CCten = varargin{1, i+1};
                 case 'initType'
@@ -105,29 +108,17 @@ if isempty(CCten)
     if init=="tensor"
         try
             CCten = crosscovten(X);
+            wInits = lathauwerSVDs(CCten,D);
         catch
             warning(['Failed to calculate cross-covariance tensor, ' ...
-                'defaulting to matrix initialisation.'])
+                'defaulting to random initialisation.'])
+            init = "random";
         end
     end
 else
     if any(size(CCten)'~=p)
         error('Dimensions of cross-covariance tensor do not match X')
     end
-end
-
-if isempty(CCten)
-    wInits = arrayfun(@(m) zeros(p(m),1),1:M,'UniformOutput',0)';
-    perms = nchoosek(1:M,2);
-    for i=1:size(perms,1)
-        I1 = perms(i,1);
-        I2 = perms(i,2);
-        [U1,~,U2] = svds(X{I1}'*X{I2},D);
-        wInits{I1} = wInits{I1} + U1;
-        wInits{I2} = wInits{I2} + U2;
-    end
-else
-    wInits = lathauwerSVDs(CCten,D);
 end
 
 for m=2:M
@@ -154,8 +145,24 @@ V = arrayfun(@(n) zeros(n,L,D),N*ones(M,1),'UniformOutput',false);
 X = cellfun(@(Xm) Xm - mean(Xm,1),X,'UniformOutput',false);
 
 for d=1:D
-    w = cellfun(@(wIm) wIm(:,d),wInits,'UniformOutput',0);
-    for l=L:-1:1
+    if init=="random"
+        for rI=1:rInits
+            wInit = arrayfun(@(m) rand(p(m),D)-0.5,1:M,'UniformOutput',0)';
+            [wtmp,rtmp] = PTDfromInit(deflate(X,W,L,d),c(L,:),wInit,param);
+            if rtmp>r(L,d)
+                w = wtmp;
+                r(L,d) = rtmp;
+            end
+        end
+    else
+        wInit = cellfun(@(wIm) wIm(:,d),wInits,'UniformOutput',0);
+        [w,r(L,d)] = PTDfromInit(deflate(X,W,L,d),c(L,:),wInit,param);
+    end
+    for m=1:M
+        W{m}(:,L,d) = w{m};
+        V{m}(:,L,d) = X{m}*w{m};
+    end
+    for l=L-1:-1:1
         [w,r(l,d)] = PTDfromInit(deflate(X,W,l,d),c(l,:),w,param);
         for m=1:M
             W{m}(:,l,d) = w{m};
@@ -169,7 +176,7 @@ c = c01;
     function Xd = deflate(X,W,l,d)
         Xd = X;
         for dd=1:d-1
-            Xd = arrayfun(@(m) Xd{m} - (W{m}(:,l,dd)*W{m}(:,l,dd)'*Xd{m}')',...
+            Xd = arrayfun(@(m) Xd{m} - (W{m}(:,l,dd)*(W{m}(:,l,dd)'*Xd{m}'))',...
                 1:M,'UniformOutput',false)';
         end
     end
